@@ -6,6 +6,7 @@ import { openPath } from "@tauri-apps/plugin-opener";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { PDFDocumentProxy } from "pdfjs-dist";
 import { ChapterList } from "./components/ChapterList";
+import { HelpDialog } from "./components/HelpDialog";
 import { PreviewPane } from "./components/PreviewPane";
 import { openPdfSession } from "./lib/pdfSession";
 import type { ChapterRecord, InspectResult, Issue, SavedProgress } from "./lib/types";
@@ -60,6 +61,7 @@ export default function App() {
   const [notice, setNotice] = useState("");
   const [failure, setFailure] = useState("");
   const [confirming, setConfirming] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
   const [resultDir, setResultDir] = useState("");
   const order = useRef(1);
   const pdfSession = useRef<{ destroy: () => Promise<void> } | null>(null);
@@ -435,6 +437,13 @@ export default function App() {
       <header>
         <div className="brand">
           <h1>PDF拆分器</h1>
+          <button type="button" className="help-open" aria-label="帮助" title="帮助" onClick={() => setHelpOpen(true)}>
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <circle cx="8" cy="8" r="6.25" fill="none" stroke="currentColor" strokeWidth="1.2" />
+              <path d="M6.2 6.1a1.8 1.8 0 1 1 2.5 1.7c-.5.2-.7.5-.7 1v.4" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+              <circle cx="8" cy="11.6" r="0.7" fill="currentColor" />
+            </svg>
+          </button>
         </div>
         <div className="source-file" title={pdfPath || undefined}>
           <span>原文件</span>
@@ -571,6 +580,8 @@ export default function App() {
         <span aria-hidden="true">|</span>
         <span>陕西龙脉云信息科技有限公司</span>
       </footer>
+
+      {helpOpen ? <HelpDialog onClose={() => setHelpOpen(false)} /> : null}
 
       {pending ? (
         <div className="modal-backdrop">
