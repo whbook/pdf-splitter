@@ -1,0 +1,60 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "PDF拆分器",
+  "version": "0.1.0",
+  "identifier": "app.pdfsplitter.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://127.0.0.1:5173",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "PDF拆分器",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 980,
+        "minHeight": 640
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "resources": {
+      "resources/pdfium.dll": "pdfium.dll",
+      "resources/使用说明.txt": "使用说明.txt",
+      "resources/LICENSE": "third-party/pdfium/LICENSE",
+      "resources/licenses/": "third-party/pdfium/licenses/"
+    },
+    "publisher": "PDF拆分器",
+    "copyright": "Copyright © 2026",
+    "shortDescription": "按章节拆分 PDF",
+    "longDescription": "预览 PDF，手工标记每章的起止页和标题，再拆成多个文件。",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "offlineInstaller",
+        "silent": true
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["SimpChinese"],
+        "displayLanguageSelector": false
+      },
+      "signCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/sign.ps1 %1"
+    }
+  }
+}
