@@ -15,6 +15,24 @@ import { HEADING_UNITS, isBlankChapter, joinPath, sanitizeComponent, sortRecords
 import appMeta from "../package.json";
 
 const EDIT_RATIO_KEY = "pdf-splitter.editRatio";
+const LAST_SESSION_KEY = "pdf-splitter.lastSession";
+
+type LastSession = { pdfPath: string; configPath: string };
+
+function readSession(): LastSession | null {
+  try {
+    const raw = JSON.parse(localStorage.getItem(LAST_SESSION_KEY) ?? "");
+    if (!raw || typeof raw.pdfPath !== "string") return null;
+    return { pdfPath: raw.pdfPath, configPath: typeof raw.configPath === "string" ? raw.configPath : "" };
+  } catch {
+    return null;
+  }
+}
+
+function writeSession(pdfPath: string, configPath: string) {
+  if (!pdfPath) return;
+  localStorage.setItem(LAST_SESSION_KEY, JSON.stringify({ pdfPath, configPath }));
+}
 
 function loadEditRatio(): number {
   const saved = Number(localStorage.getItem(EDIT_RATIO_KEY));
@@ -22,9 +40,12 @@ function loadEditRatio(): number {
 }
 
 type Snapshot = {
+  pdfPath: string;
   bookId: string;
   bookTitle: string;
   outputDir: string;
+  sourceDir: string;
+  configPath: string;
   headingUnit: string;
   chapters: ChapterRecord[];
   page: number;
@@ -40,6 +61,9 @@ export default function App() {
   const [pdfPath, setPdfPath] = useState("");
   const [bookId, setBookId] = useState("");
   const [bookTitle, setBookTitle] = useState("");
+  const [titleDraft, setTitleDraft] = useState("");
+  const [renameAsk, setRenameAsk] = useState<string | null>(null);
+  const [closeAfterRename, setCloseAfterRename] = useState(false);
   const [headingUnit, setHeadingUnit] = useState("");
   const [outputDir, setOutputDir] = useState("");
   const [sourceDir, setSourceDir] = useState("");
@@ -52,6 +76,7 @@ export default function App() {
   const [pdfDocument, setPdfDocument] = useState<PDFDocumentProxy | null>(null);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [pendingImport, setPendingImport] = useState<ReturnType<typeof parseRecordFile> | null>(null);
+  const importPathRef = useRef("");
   const [reveal, setReveal] = useState(0);
   const activeIdRef = useRef<string | null>(null);
   const [autosave, setAutosave] = useState(false);
@@ -62,15 +87,22 @@ export default function App() {
   const [failure, setFailure] = useState("");
   const [confirming, setConfirming] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
+  const [closeAsk, setCloseAsk] = useState(false);
   const [resultDir, setResultDir] = useState("");
   const order = useRef(1);
   const pdfSession = useRef<{ destroy: () => Promise<void> } | null>(null);
   const mainRef = useRef<HTMLElement>(null);
   const editRatioRef = useRef(editRatio);
+  const configPathRef = useRef(readSession()?.configPath ?? "");
+  const titleDraftRef = useRef("");
+  const closingRef = useRef(false);
   const snapshot = useRef<Snapshot>({
+    pdfPath: "",
     bookId: "",
     bookTitle: "",
     outputDir: "",
+    sourceDir: "",
+    configPath: "",
     headingUnit: "",
     chapters: [],
     page: 1,
@@ -92,8 +124,20 @@ export default function App() {
   const warningIds = new Set(plan.warnings.flatMap((issue) => (issue.recordId ? [issue.recordId] : [])));
   const showChecks = Boolean(pdfPath) || chapters.some((item) => !isBlankChapter(item));
 
-  snapshot.current = { bookId, bookTitle, outputDir, headingUnit, chapters, page, autosave };
+  snapshot.current = {
+    pdfPath,
+    bookId,
+    bookTitle,
+    outputDir,
+    sourceDir,
+    configPath: configPathRef.current,
+    headingUnit,
+    chapters,
+    page,
+    autosave,
+  };
   editRatioRef.current = editRatio;
+  titleDraftRef.current = titleDraft;
 
   const flushSave = useCallback(async (current = snapshot.current) => {
     if (!current.autosave || !current.bookId) return;
@@ -120,21 +164,70 @@ export default function App() {
   useEffect(() => {
     let unlisten = () => {};
     void getCurrentWindow()
-      .onCloseRequested(async (event) => {
-        const current = snapshot.current;
-        if (!current.autosave || !current.bookId) return;
+      .onCloseRequested((event) => {
         event.preventDefault();
-        try {
-          await flushSave(current);
-        } finally {
-          await getCurrentWindow().destroy();
+        const current = snapshot.current;
+        const next = titleDraftRef.current.trim();
+        if (next !== current.bookTitle && current.chapters.some((item) => !isBlankChapter(item))) {
+          setTitleDraft(next);
+          setRenameAsk(next);
+          setCloseAfterRename(true);
+          return;
         }
+        if (next !== current.bookTitle) {
+          setBookTitle(next);
+          snapshot.current = { ...current, bookTitle: next };
+        }
+        setCloseAsk(true);
       })
       .then((stop) => {
         unlisten = stop;
       });
     return () => unlisten();
-  }, [flushSave]);
+  }, []);
+
+  useEffect(() => {
+    setTitleDraft(bookTitle);
+  }, [bookTitle]);
+
+  useEffect(() => {
+    const session = readSession();
+    if (!session?.pdfPath || !session.configPath) return;
+    let cancelled = false;
+    void (async () => {
+      setBusy("正在恢复上次的书籍…");
+      try {
+        const info = await invoke<InspectResult>("inspect_pdf", { path: session.pdfPath });
+        const text = await invoke<string>("read_text_file", { path: session.configPath });
+        const imported = parseRecordFile(text);
+        if (cancelled) return;
+        setPdfPath(session.pdfPath);
+        setBookId(info.bookId);
+        setSourceDir(info.parentDir);
+        configPathRef.current = session.configPath;
+        await loadDocument(info);
+        if (cancelled) return;
+        const saved = info.progress;
+        setBookTitle((imported.bookTitle.trim() || info.defaultTitle).trim());
+        setHeadingUnit(imported.headingUnit);
+        setOutputDir(saved?.outputDir || info.parentDir);
+        setOutputPicked(Boolean(saved?.outputDir && saved.outputDir !== info.parentDir));
+        setChapters(imported.chapters);
+        rememberOrder(imported.chapters);
+        setPage(Math.min(info.pageCount, Math.max(1, saved?.lastPage || 1)));
+        setPageCount(info.pageCount);
+        setAutosave(true);
+        setNotice(`已恢复上次的书籍和 ${imported.chapters.length} 条拆分记录。`);
+      } catch {
+        if (!cancelled) localStorage.removeItem(LAST_SESSION_KEY);
+      } finally {
+        if (!cancelled) setBusy("");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     function onKey(event: KeyboardEvent) {
@@ -202,6 +295,8 @@ export default function App() {
       setPdfPath(selected);
       setBookId(info.bookId);
       setSourceDir(info.parentDir);
+      configPathRef.current = "";
+      writeSession(selected, "");
       await loadDocument(info);
       const saved = info.progress;
       const meaningful =
@@ -309,9 +404,71 @@ export default function App() {
     order.current = imported.chapters.reduce((max, item) => Math.max(max, item.manualOrder), 0) + 1;
     setResultDir("");
     setFailure("");
+    if (importPathRef.current) {
+      configPathRef.current = importPathRef.current;
+      writeSession(snapshot.current.pdfPath, importPathRef.current);
+    }
     const sourceTitle = imported.bookTitle.trim();
     const titleNote = sourceTitle && sourceTitle !== bookTitle.trim() ? `文件中的书籍总名是「${sourceTitle}」。` : "";
     setNotice(`已导入 ${imported.chapters.length} 条拆分记录。${titleNote}`);
+  }
+
+  function rememberConfig(path: string) {
+    configPathRef.current = path;
+    writeSession(snapshot.current.pdfPath, path);
+  }
+
+  async function writeConfigFile(current: Snapshot) {
+    const name = sanitizeComponent(current.bookTitle);
+    if (!name) throw new Error("书籍总名无效，无法导出配置。");
+    const fileName = `${name}.json`;
+    let path = fileName;
+    if (current.configPath) {
+      const slash = Math.max(current.configPath.lastIndexOf("\\"), current.configPath.lastIndexOf("/"));
+      const dir = slash >= 0 ? current.configPath.slice(0, slash) : "";
+      path = dir ? joinPath(dir, fileName) : fileName;
+    } else if (current.outputDir || current.sourceDir) {
+      path = joinPath(current.outputDir || current.sourceDir, fileName);
+    } else {
+      throw new Error("没有可写入配置的目录。");
+    }
+    const payload = buildRecordFile(current.bookTitle.trim(), current.headingUnit, current.chapters);
+    await invoke("write_text_file", { path, contents: `${JSON.stringify(payload, null, 2)}\n` });
+    rememberConfig(path);
+    return payload.chapters.length;
+  }
+
+  function commitTitle() {
+    const next = titleDraft.trim();
+    if (next !== titleDraft) setTitleDraft(next);
+    if (next === bookTitle) return;
+    if (next === bookTitle.trim()) {
+      setBookTitle(next);
+      return;
+    }
+    if (chapters.some((item) => !isBlankChapter(item))) {
+      setRenameAsk(next);
+      return;
+    }
+    setBookTitle(next);
+  }
+
+  async function confirmClose() {
+    if (closingRef.current) return;
+    closingRef.current = true;
+    const current = snapshot.current;
+    setCloseAsk(false);
+    try {
+      if (current.chapters.some((item) => !isBlankChapter(item))) {
+        const count = await writeConfigFile(current);
+        setNotice(`已导出 ${count} 条拆分记录。`);
+      }
+      await flushSave(current);
+      await getCurrentWindow().destroy();
+    } catch (reason) {
+      closingRef.current = false;
+      setFailure(textOf(reason));
+    }
   }
 
   async function exportRecords() {
@@ -333,6 +490,7 @@ export default function App() {
       if (!selected) return;
       const payload = buildRecordFile(bookTitle.trim(), headingUnit, chapters);
       await invoke("write_text_file", { path: selected, contents: `${JSON.stringify(payload, null, 2)}\n` });
+      rememberConfig(selected);
       setFailure("");
       setNotice(`已导出 ${payload.chapters.length} 条拆分记录。`);
     } catch (reason) {
@@ -349,6 +507,7 @@ export default function App() {
       });
       if (typeof selected !== "string") return;
       const text = await invoke<string>("read_text_file", { path: selected });
+      importPathRef.current = selected;
       const imported = parseRecordFile(text);
       if (chapters.some((item) => !isBlankChapter(item))) {
         setPendingImport(imported);
@@ -456,7 +615,15 @@ export default function App() {
         </div>
         <label className="book-title">
           书籍总名
-          <input value={bookTitle} onChange={(event) => setBookTitle(event.target.value)} placeholder="用于文件名" />
+          <input
+            value={titleDraft}
+            onChange={(event) => setTitleDraft(event.target.value.replace(/^\s+/, ""))}
+            onBlur={commitTitle}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") event.currentTarget.blur();
+            }}
+            placeholder="用于文件名"
+          />
         </label>
       </header>
 
@@ -582,6 +749,68 @@ export default function App() {
       </footer>
 
       {helpOpen ? <HelpDialog onClose={() => setHelpOpen(false)} /> : null}
+
+      {closeAsk ? (
+        <div className="modal-backdrop">
+          <div className="modal" role="dialog" aria-modal="true">
+            <h2>确定关闭</h2>
+            <p>
+              {chapters.some((item) => !isBlankChapter(item))
+                ? "关闭前会先把当前拆分记录导出为配置文件，文件名使用书籍总名。"
+                : "确定要关闭 PDF拆分器吗？"}
+            </p>
+            <div className="modal-actions">
+              <button type="button" className="primary" onClick={() => void confirmClose()}>
+                确定
+              </button>
+              <button type="button" onClick={() => setCloseAsk(false)}>
+                取消
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {renameAsk != null ? (
+        <div className="modal-backdrop">
+          <div className="modal" role="dialog" aria-modal="true">
+            <h2>重命名拆分章节</h2>
+            <p>
+              书籍总名将改为「{renameAsk || "（空）"}」。确定后，已有章节的文件名预览会改用这个名称。标题预览仍是章节序号和标题。
+            </p>
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="primary"
+                onClick={() => {
+                  setBookTitle(renameAsk);
+                  snapshot.current = { ...snapshot.current, bookTitle: renameAsk };
+                  setRenameAsk(null);
+                  if (closeAfterRename) {
+                    setCloseAfterRename(false);
+                    setCloseAsk(true);
+                  }
+                }}
+              >
+                确定
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setTitleDraft(bookTitle);
+                  setRenameAsk(null);
+                  if (closeAfterRename) {
+                    setCloseAfterRename(false);
+                    setCloseAsk(true);
+                  }
+                }}
+              >
+                取消
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {pending ? (
         <div className="modal-backdrop">
